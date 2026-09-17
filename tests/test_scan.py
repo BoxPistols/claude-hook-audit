@@ -26,6 +26,7 @@ WIDGET = "/opt/example/bin/widget-notify"
 QUIET = "/opt/example/bin/quiet-hook"
 REPORT = 'node "${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs"'
 KEEPER = 'node "${CLAUDE_PLUGIN_ROOT}/hooks/gatekeeper.mjs"'
+DORMANT = 'node "${CLAUDE_PLUGIN_ROOT}/hooks/farewell.mjs"'
 
 SETTINGS = {
     "hooks": {
@@ -49,6 +50,9 @@ PLUGIN_HOOKS = {"hooks": {
         {"type": "command", "command": REPORT, "async": True, "timeout": 3}]}],
     "PostToolUse": [{"matcher": "Edit", "hooks": [
         {"type": "command", "command": KEEPER, "timeout": 7}]}],
+    # Configured by the plugin, never observed: the report should name the plugin.
+    "SessionEnd": [{"matcher": "*", "hooks": [
+        {"type": "command", "command": DORMANT}]}],
 }}
 
 PLUGIN_KEY = "reporter@example-marketplace"
@@ -163,6 +167,11 @@ class ScanTest(unittest.TestCase):
         self.assertNotIn(GATE, self.data["configured_but_unobserved"])
         self.assertIn(QUIET, self.data["configured_but_unobserved"])
 
+    def test_an_unobserved_plugin_hook_names_the_plugin_that_configured_it(self):
+        self.assertIn(DORMANT, self.data["configured_but_unobserved"])
+        line = [ln for ln in self.report.splitlines() if "farewell.mjs" in ln][0]
+        self.assertIn(PLUGIN_KEY, line)
+
     def test_plugin_declared_hook_is_matched(self):
         r = self.rows[("SessionStart", REPORT)]
         self.assertTrue(r["in_settings"], "plugin hooks.json was not read")
@@ -272,6 +281,19 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(scan.redact('python3 -c "import os"'), "<inline script>")
         self.assertEqual(scan.redact('python3 -c "print(1); print(TOKEN)"'),
                          "<inline shell>")
+
+    def test_the_readme_sample_is_the_format_the_program_prints(self):
+        """A sample output that has drifted from the program is worse than none.
+
+        Both lines are taken from this run's own report, so this fails when the
+        report changes shape and the README is not updated with it."""
+        with open(os.path.join(HERE, os.pardir, "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        lines = self.report.splitlines()
+        title = [ln for ln in lines if ln.startswith("BLOCKING  (")][0]
+        header = [ln for ln in lines if ln.strip().startswith("main    runs")][0]
+        self.assertIn(title, readme)
+        self.assertIn(header, readme)
 
     # --- refusing to produce a confident report from an input it could not read ---
 

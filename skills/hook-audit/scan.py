@@ -280,6 +280,7 @@ def build_rows(runs, outcomes, timeouts, cfg, hide):
             "is_async": bool(meta.get("async")),
             "in_settings": key in cfg,
             "origins": sorted(meta.get("origins") or []),
+            "matchers": sorted(meta.get("matchers") or []),
             "other_outcomes": {k: v for k, v in counts.items()
                                if k not in (SUCCESS, CANCELLED, BLOCKED, CONTEXT)},
             "_key": key,
@@ -500,9 +501,12 @@ def main():
         print("  A hook that succeeds with empty output is not persisted, so this is the "
               "expected place for quiet hooks. Zero runs here does not mean it rarely fires.")
         for cmd, m in silent.items():
-            print("  [%s]%s %s" % (",".join(sorted(m["events"])),
-                                   " (async)" if m["async"] else "",
-                                   show(cmd)[:CMD_W]))
+            # A hook you did not write, configured and never seen, is worth naming.
+            plugins = [o for o in sorted(m["origins"]) if not o.endswith(".json")]
+            print("  [%s]%s%s %s" % (",".join(sorted(m["events"])),
+                                     " (async)" if m["async"] else "",
+                                     " (%s)" % ",".join(plugins) if plugins else "",
+                                     show(cmd)[:CMD_W]))
         print()
 
     if [r for r in blocking if r["event"] in PER_CALL_EVENTS]:

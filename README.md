@@ -8,8 +8,8 @@ hits its limit. This reads that.
 ```
 Window: 231 transcripts, 2026-09-10 11:31 - 2026-09-18 07:20 (7.8 days)
 
-Blocking hooks held up the main session for at least 25.0 minutes over this window
-  (6 of 15 observed event/hook pairs block). A floor, not a total: a hook
+Blocking hooks held up the main session for at least 27.7 minutes over this window
+  (10 of 15 observed event/hook pairs block). A floor, not a total: a hook
   that succeeds with empty output is never persisted, and 15 configured hooks
   were not observed at all.
   A further 45.8 minutes of hook time ran inside subagents. Those run in parallel
@@ -24,25 +24,38 @@ BLOCKING  (main = time the main session spent waiting, summed over its runs)
      12.3m    4542     302ms    1190ms     5277ms  PostToolUse
   *         [status line updater]
             + 2335 of those runs were inside subagents (22.8m, in parallel)
-
-BLOCKING WITH NO KNOWN TIMEOUT
-  [PreToolUse] max seen 777576ms  [desktop widget hook]
+  ... 8 further rows
 
 TIMED OUT (ran until the limit fired; durationMs is a floor, and can overshoot it)
-  2x  [PreToolUse] limit=600000ms (not set; event default)  [desktop widget hook]
+  3x  [UserPromptSubmit] limit=30000ms (not set; event default)  [session bootstrap]
+  1x  [PreToolUse] limit=10000ms  [pre-write check]
+
+STOPPED A TOOL CALL (hook exited 2)
+  Expected from a gate that is doing its job. From a reporting hook it is a bug, and
+  it costs a retry every time.
+  116x  [PostToolUse] [prose linter]
+  32x  [PostToolUse] [prose linter, from a working copy]
+  10x  [PostToolUse] [prose linter, from the installed plugin]
 ```
 
-Only the hook names are edited here, to brackets. A real run prints the command;
-`--redact` prints the script basename and its arguments.
+An excerpt of a real report. Hook names are replaced with brackets, and the two ranked
+rows are shown as they read before those hooks were marked `async`; every number is
+measured. A real run prints the command, and `--redact` prints the script basename with
+its arguments.
 
-Two hooks that each look fine at 300ms were costing 25 minutes of waiting a week.
-Both only updated a status display, so neither needed to block. Marking them
-`"async": true` removed the wait without losing a single status update.
+Two hooks that each look fine at 300ms were costing 25 of those 27.7 minutes. Both only
+updated a status display, so neither needed to block. Marking them `"async": true`
+removed the wait without losing a single status update.
 
-Note the second number. Another 45 minutes of the same hooks ran inside subagents,
-where they hold up that subagent and nothing else: subagents run concurrently with
-each other and with the main loop, so adding that time to the total would describe
-waiting that never happened. The report keeps the two apart.
+Then read the second number. Another 45 minutes of the same two hooks ran inside
+subagents, where each one holds up that subagent and nothing else. Subagents run
+concurrently with each other and with the main loop, so adding that time in would
+describe waiting that never happened. The report keeps the two apart, per hook.
+
+The 158 stopped tool calls were one prose linter, registered three times, refusing
+writes. That is the hook working as intended. Those records carry no
+duration at all, so a hook can be costing a retry on every write while showing zero
+time in every other section.
 
 ## Install
 
