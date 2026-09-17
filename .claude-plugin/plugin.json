@@ -1,0 +1,9 @@
+{
+  "name": "hook-audit",
+  "description": "Profile Claude Code hooks from transcripts that already exist. Ranks hooks by total blocking time, separates blocking from async, finds hangs and timeouts.",
+  "version": "0.1.0",
+  "author": {
+    "name": "BoxPistols"
+  },
+  "homepage": "https://github.com/BoxPistols/claude-hook-audit"
+}

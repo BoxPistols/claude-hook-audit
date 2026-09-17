@@ -1,0 +1,15 @@
+{
+  "name": "claude-hook-audit",
+  "description": "Retrospective hook profiler for Claude Code. Reads the durationMs that Claude Code already writes to session transcripts, so no wrapper has to be installed in front of your hooks first.",
+  "owner": {
+    "name": "BoxPistols",
+    "url": "https://github.com/BoxPistols"
+  },
+  "plugins": [
+    {
+      "name": "hook-audit",
+      "source": "./",
+      "description": "Profile Claude Code hooks from transcripts that already exist. Ranks hooks by total blocking time, separates blocking from async, finds hangs and timeouts."
+    }
+  ]
+}
