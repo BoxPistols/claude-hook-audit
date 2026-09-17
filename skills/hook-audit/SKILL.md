@@ -17,11 +17,12 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/hook-audit/scan.py" --project "$PWD"
 ```
 
 Useful flags: `--files N` to limit the window to the N most recent transcripts,
-`--json` for machine-readable output, `--settings FILE` to add a settings file.
+`--json` for machine-readable output, `--settings FILE` to add a settings file,
+`--redact` to print basenames instead of full commands.
 
-The mode column (blocking or async) comes from the current settings cascade. The
-timings come from the window. After changing a hook's configuration, past runs still
-appear under the new mode.
+Blocking or async comes from the current configuration: the settings cascade plus the
+`hooks/hooks.json` of each installed plugin. The timings come from the window. After
+changing a hook's configuration, past runs still appear under the new mode.
 
 ## Read the report in this order
 
@@ -36,6 +37,10 @@ total first, then look at the tail.
 A hook with `"async": true` does not hold up the loop. Its time is real but nobody
 waits for it, so it does not belong in the same total as a blocking hook. Read the
 two tables separately and never propose "removing" an async hook to save time.
+
+Rows marked `*` fire on every tool call or prompt. Rows marked `?` were not found in
+any configuration, so their mode is an assumption; say so rather than reporting them
+as measured blocking time.
 
 ### 3. The tail is a separate question from the median
 
@@ -56,7 +61,7 @@ is the user pressing Esc and says nothing about hook speed.
 A hook that succeeds with empty output is not persisted to the transcript. Hooks listed
 under "configured but not observed" are the expected case for quiet hooks. Zero recorded
 runs does not mean the hook rarely fires. Judge those by reading the command, not by the
-count.
+count. For the same reason the headline total is a floor, not a total.
 
 ## What to change
 
@@ -81,6 +86,12 @@ background process, or remove it.
 
 Do not edit hook configuration without saying what will change and getting agreement.
 A hook exists because someone wanted the behavior.
+
+## Before pasting the report anywhere
+
+The default output carries absolute paths, which name the account, and full command
+strings, which can carry a token if the hook is inline shell. Re-run with `--redact`
+for anything that leaves the machine. Counts and timings are the same either way.
 
 ## Scope
 
