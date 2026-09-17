@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Local Claude Code state, if you run it inside this repo
+.claude/
