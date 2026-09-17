@@ -3,10 +3,11 @@
 
     python3 -m unittest discover -s tests
 
-Every path and name here is invented. The point of the fixture is the shapes
-Claude Code actually writes: a statusMessage in place of the command, a hook
-declared by a plugin rather than by settings.json, and a cancellation that is a
-user Esc rather than a timeout.
+Every path and name here is invented. What is not invented is the shape of the
+records: each one below is a shape Claude Code actually writes, including the ones
+that cost this scanner a bug — a statusMessage in place of the command, a blocked
+tool call that carries no command field and no duration, a plugin command recorded
+with ${CLAUDE_PLUGIN_ROOT} already expanded, and runs made inside a subagent.
 """
 import json
 import os
@@ -15,12 +16,16 @@ import sys
 import tempfile
 import unittest
 
-SCAN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                    os.pardir, "skills", "hook-audit", "scan.py")
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCAN = os.path.join(HERE, os.pardir, "skills", "hook-audit", "scan.py")
+sys.path.insert(0, os.path.join(HERE, os.pardir, "skills", "hook-audit"))
+import scan  # noqa: E402
 
 GATE = '/usr/bin/python3 "$HOME/hooks/gate.py"'
 WIDGET = "/opt/example/bin/widget-notify"
-PLUGIN_CMD = 'node "${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs"'
+QUIET = "/opt/example/bin/quiet-hook"
+REPORT = 'node "${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs"'
+KEEPER = 'node "${CLAUDE_PLUGIN_ROOT}/hooks/gatekeeper.mjs"'
 
 SETTINGS = {
     "hooks": {
@@ -35,125 +40,217 @@ SETTINGS = {
             {"type": "command", "command": WIDGET}]}],
         # Configured, never observed in the window.
         "SessionEnd": [{"matcher": "*", "hooks": [
-            {"type": "command", "command": "/opt/example/bin/quiet-hook"}]}],
+            {"type": "command", "command": QUIET}]}],
     }
 }
 
-PLUGIN_HOOKS = {
-    "hooks": {"SessionStart": [{"matcher": "startup", "hooks": [
-        {"type": "command", "command": PLUGIN_CMD, "async": True, "timeout": 3}]}]}
-}
+PLUGIN_HOOKS = {"hooks": {
+    "SessionStart": [{"matcher": "startup", "hooks": [
+        {"type": "command", "command": REPORT, "async": True, "timeout": 3}]}],
+    "PostToolUse": [{"matcher": "Edit", "hooks": [
+        {"type": "command", "command": KEEPER, "timeout": 7}]}],
+}}
+
+PLUGIN_KEY = "reporter@example-marketplace"
 
 
-def entry(event, command, duration, kind="hook_success", **extra):
-    a = {"type": kind, "hookEvent": event, "command": command, "durationMs": duration}
+def rec(event, duration, command=None, kind="hook_success", sidechain=False, **extra):
+    a = {"type": kind, "hookEvent": event, "hookName": event + ":Edit"}
+    if command is not None:
+        a["command"] = command
+    if duration is not None:
+        a["durationMs"] = duration
     a.update(extra)
-    return json.dumps({"type": "attachment", "attachment": a}) + "\n"
+    return json.dumps({"type": "attachment", "attachment": a,
+                       "isSidechain": sidechain}) + "\n"
 
 
-TRANSCRIPT = "".join([
-    entry("PreToolUse", "checking the write", 120),
-    entry("PreToolUse", "checking the write", 180),
-    entry("Stop", WIDGET, 400),
-    entry("UserPromptSubmit", WIDGET, 300),
-    entry("UserPromptSubmit", WIDGET, 300),
-    entry("UserPromptSubmit", WIDGET, 300),
-    entry("SessionStart", PLUGIN_CMD, 900),
-    # Ran until its limit fired.
-    entry("PreToolUse", "checking the write", 10000,
-          kind="hook_cancelled", timedOut=True, timeoutMs=10000),
-    # The user pressed Esc. Not a timeout, and says nothing about speed.
-    entry("Stop", WIDGET, 50, kind="hook_cancelled"),
-    entry("SessionStart", PLUGIN_CMD, 900, kind="hook_non_blocking_error"),
-    '{"type":"user","message":"a line with no hook in it"}\n',
-    "not json at all\n",
-])
+def transcript(install):
+    keeper_expanded = KEEPER.replace("${CLAUDE_PLUGIN_ROOT}", install)
+    lines = []
+    # 21 runs whose sum, median, p95 and max are all different numbers.
+    for _ in range(18):
+        lines.append(rec("UserPromptSubmit", 100, WIDGET))
+    lines.append(rec("UserPromptSubmit", 5000, WIDGET))
+    lines.append(rec("UserPromptSubmit", 20000, WIDGET))
+    # Ran until a limit that is nowhere in the settings.
+    lines.append(rec("UserPromptSubmit", 60000, WIDGET, kind="hook_cancelled",
+                     timedOut=True, timeoutMs=60000))
+    # The user pressed Esc. timedOut is present and false.
+    lines.append(rec("Stop", 50, WIDGET, kind="hook_cancelled", timedOut=False))
+    lines.append(rec("Stop", 400, WIDGET))
+    # Recorded under the statusMessage, not the command.
+    lines.append(rec("PreToolUse", 120, "checking the write"))
+    lines.append(rec("PreToolUse", 180, "checking the write"))
+    # One main-session run and five inside subagents.
+    lines.append(rec("SessionStart", 900, REPORT))
+    for _ in range(5):
+        lines.append(rec("SessionStart", 1000, REPORT, sidechain=True))
+    # Blocked tool calls: no command field, no duration, command in the message.
+    for _ in range(3):
+        lines.append(rec("PostToolUse", None, kind="hook_blocking_error",
+                         blockingError={"blockingError":
+                                        "[%s]: refused\nline two" % keeper_expanded}))
+    # Carries no hook identity at all.
+    lines.append(rec("PreToolUse", None, kind="hook_additional_context",
+                     content=["some context"]))
+    # A type this scanner has never seen.
+    lines.append(rec("Stop", 70, WIDGET, kind="hook_something_new"))
+    lines.append('{"type":"user","message":"a line with no hook in it"}\n')
+    lines.append("not json at all\n")
+    return "".join(lines)
 
 
-def build(root):
-    os.makedirs(os.path.join(root, "projects", "example-project"))
-    with open(os.path.join(root, "projects", "example-project", "s.jsonl"), "w",
-              encoding="utf-8") as f:
-        f.write(TRANSCRIPT)
-    with open(os.path.join(root, "settings.json"), "w", encoding="utf-8") as f:
-        json.dump(SETTINGS, f)
-    install = os.path.join(root, "plugins", "cache", "example-marketplace",
+def build(home):
+    cfg = os.path.join(home, "cfg")
+    os.makedirs(os.path.join(cfg, "projects", "example-project"))
+    install = os.path.join(cfg, "plugins", "cache", "example-marketplace",
                            "reporter", "1.0.0")
     os.makedirs(os.path.join(install, "hooks"))
+    with open(os.path.join(cfg, "projects", "example-project", "s.jsonl"), "w",
+              encoding="utf-8") as f:
+        f.write(transcript(install))
+    with open(os.path.join(cfg, "settings.json"), "w", encoding="utf-8") as f:
+        json.dump(SETTINGS, f)
     with open(os.path.join(install, "hooks", "hooks.json"), "w", encoding="utf-8") as f:
         json.dump(PLUGIN_HOOKS, f)
-    os.makedirs(os.path.join(root, "plugins"), exist_ok=True)
-    with open(os.path.join(root, "plugins", "installed_plugins.json"), "w",
+    with open(os.path.join(cfg, "plugins", "installed_plugins.json"), "w",
               encoding="utf-8") as f:
-        json.dump({"version": 2, "plugins": {"reporter@example-marketplace": [
+        json.dump({"version": 2, "plugins": {PLUGIN_KEY: [
             {"scope": "user", "installPath": install, "version": "1.0.0"}]}}, f)
+    return cfg
 
 
-def run(root, *args):
-    env = dict(os.environ, CLAUDE_CONFIG_DIR=root)
-    out = subprocess.check_output(
-        [sys.executable, SCAN, "--root", os.path.join(root, "projects"), *args],
-        env=env, stderr=subprocess.STDOUT)
-    return out.decode("utf-8")
+def run(home, *args, **kw):
+    """Runs with HOME and a tilde in CLAUDE_CONFIG_DIR, which is the shape a
+    config file or a quoted argument hands over."""
+    env = dict(os.environ, HOME=home, CLAUDE_CONFIG_DIR="~/cfg")
+    env.pop("CLAUDE_CODE_SSE_PORT", None)
+    p = subprocess.run([sys.executable, SCAN, *args], env=env,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if kw.get("check", True) and p.returncode != 0:
+        raise AssertionError("exit %d: %s" % (p.returncode, p.stderr.decode()))
+    return p
 
 
 class ScanTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
-        build(cls.tmp.name)
-        cls.data = json.loads(run(cls.tmp.name, "--json"))
-        cls.report = run(cls.tmp.name)
-        cls.hidden = json.loads(run(cls.tmp.name, "--json", "--redact"))
+        cls.cfg = build(cls.tmp.name)
+        cls.data = json.loads(run(cls.tmp.name, "--json").stdout.decode())
+        cls.report = run(cls.tmp.name).stdout.decode()
+        cls.hidden = json.loads(run(cls.tmp.name, "--json", "--redact").stdout.decode())
         cls.rows = {(r["event"], r["command"]): r for r in cls.data["hooks"]}
 
     @classmethod
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
+    # --- identity: matching a run back to the entry that configured it ---
+
+    def test_tilde_in_config_dir_is_expanded(self):
+        """Nothing else in this class runs if the default root did not resolve."""
+        self.assertEqual(self.data["window"]["transcripts"], 1)
+
     def test_status_message_resolves_to_its_hook(self):
-        """The transcript holds the statusMessage; the timeout is on the command."""
         r = self.rows[("PreToolUse", "checking the write")]
         self.assertTrue(r["in_settings"])
-        self.assertEqual(r["timeout_setting"], 10)
+        self.assertEqual(r["timeout_s"], 10)
         self.assertFalse(r["is_async"])
 
     def test_a_hook_that_ran_is_not_reported_as_unobserved(self):
         self.assertNotIn(GATE, self.data["configured_but_unobserved"])
-        self.assertIn("/opt/example/bin/quiet-hook",
-                      self.data["configured_but_unobserved"])
+        self.assertIn(QUIET, self.data["configured_but_unobserved"])
 
     def test_plugin_declared_hook_is_matched(self):
-        r = self.rows[("SessionStart", PLUGIN_CMD)]
+        r = self.rows[("SessionStart", REPORT)]
         self.assertTrue(r["in_settings"], "plugin hooks.json was not read")
         self.assertTrue(r["is_async"])
-        self.assertEqual(r["timeout_setting"], 3)
-        self.assertEqual(r["total_blocking_ms"], 0)
-        self.assertEqual(r["failures"], 1)
+        self.assertEqual(r["timeout_s"], 3)
+
+    def test_expanded_plugin_root_is_matched(self):
+        """A blocked call records the command with the variable resolved."""
+        row = [r for r in self.data["hooks"] if r["blocked_calls"]]
+        self.assertEqual(len(row), 1)
+        self.assertTrue(row[0]["in_settings"], "expanded ${CLAUDE_PLUGIN_ROOT} missed")
+        self.assertEqual(row[0]["timeout_s"], 7)
 
     def test_mode_is_per_event_not_per_command(self):
         self.assertTrue(self.rows[("Stop", WIDGET)]["is_async"])
         self.assertFalse(self.rows[("UserPromptSubmit", WIDGET)]["is_async"])
 
-    def test_blocking_total_is_runs_times_median(self):
+    # --- what the numbers mean ---
+
+    def test_total_is_the_sum_of_the_runs(self):
         r = self.rows[("UserPromptSubmit", WIDGET)]
-        self.assertEqual(r["runs"], 3)
-        self.assertEqual(r["median_ms"], 300)
-        self.assertEqual(r["total_blocking_ms"], 900)
+        total = 18 * 100 + 5000 + 20000 + 60000
+        self.assertEqual(r["runs"], 21)
+        self.assertEqual(r["median_ms"], 100)
+        self.assertEqual(r["total_ms"], total)
+        self.assertEqual(r["main_total_ms"], total)
+        self.assertEqual(r["total_blocking_ms"], total)
+        # runs x median would report 2,100ms for the same 86,800ms of waiting
+        self.assertNotEqual(r["total_ms"], r["runs"] * r["median_ms"])
+
+    def test_p95_is_nearest_rank_and_absent_below_twenty_runs(self):
+        self.assertEqual(self.rows[("UserPromptSubmit", WIDGET)]["p95_ms"], 20000)
+        self.assertEqual(self.rows[("UserPromptSubmit", WIDGET)]["max_ms"], 60000)
+        self.assertIsNone(self.rows[("PreToolUse", "checking the write")]["p95_ms"])
+        self.assertEqual(scan.percentile(list(range(1, 21)), 0.95), 19)
+        self.assertIsNone(scan.percentile([], 0.95))
+
+    def test_subagent_runs_are_kept_out_of_main_session_time(self):
+        r = self.rows[("SessionStart", REPORT)]
+        self.assertEqual(r["runs"], 6)
+        self.assertEqual(r["subagent_runs"], 5)
+        self.assertEqual(r["main_total_ms"], 900)
+        self.assertEqual(r["subagent_total_ms"], 5000)
+        self.assertIn("inside subagents", self.report)
+
+    def test_blocking_headline_counts_main_session_time_only(self):
+        blocking = [r for r in self.data["hooks"]
+                    if not r["is_async"] and r["total_blocking_ms"]]
+        self.assertEqual(sum(r["total_blocking_ms"] for r in blocking),
+                         86800 + 300)          # the widget row plus the gate's two runs
+        self.assertIn("at least 1.5 minutes", self.report)
 
     def test_only_timed_out_entries_count_as_timeouts(self):
-        self.assertEqual(self.rows[("PreToolUse", "checking the write")]["timeouts"], 1)
+        self.assertEqual(self.rows[("UserPromptSubmit", WIDGET)]["timeouts"], 1)
         self.assertEqual(self.rows[("Stop", WIDGET)]["timeouts"], 0)
 
-    def test_a_timed_out_run_is_in_the_durations(self):
-        """durationMs is a floor there, and dropping it would understate the cost."""
-        self.assertEqual(self.rows[("PreToolUse", "checking the write")]["runs"], 3)
+    def test_an_observed_limit_is_not_an_unknown_timeout(self):
+        """The hook has no configured timeout, but its real limit was recorded."""
+        r = self.rows[("UserPromptSubmit", WIDGET)]
+        self.assertIsNone(r["timeout_s"])
+        self.assertEqual(r["timeout_observed_ms"], 60000)
+        section = self.report.split("BLOCKING WITH NO KNOWN TIMEOUT")
+        self.assertEqual(len(section), 1, "listed as unknown despite an observed limit")
+
+    # --- records this reads but does not own ---
+
+    def test_a_blocked_call_is_reported_even_with_no_duration(self):
+        row = [r for r in self.data["hooks"] if r["blocked_calls"]][0]
+        self.assertEqual(row["blocked_calls"], 3)
+        self.assertEqual(row["runs"], 0)
+        self.assertIn("STOPPED A TOOL CALL", self.report)
+        self.assertNotIn(KEEPER.replace("${CLAUDE_PLUGIN_ROOT}", ""),
+                         self.report.split("STOPPED A TOOL CALL")[0])
+
+    def test_an_unknown_outcome_type_is_surfaced_not_dropped(self):
+        r = self.rows[("Stop", WIDGET)]
+        self.assertEqual(r["other_outcomes"], {"hook_something_new": 1})
+        self.assertIn("UNRECOGNIZED OUTCOMES", self.report)
+
+    def test_records_with_no_identity_are_counted_and_named(self):
+        self.assertEqual(self.data["unattributed_records"],
+                         {"hook_additional_context": 1})
+        self.assertIn("could not be attributed", self.report)
 
     def test_unparsable_lines_are_skipped(self):
-        self.assertEqual(len(self.data["hooks"]), 4)
+        self.assertEqual(len(self.data["hooks"]), 5)
 
-    def test_report_names_its_total_a_floor(self):
-        self.assertIn("at least", self.report)
+    # --- what leaves the machine ---
 
     def test_redact_removes_paths_and_keeps_the_counts(self):
         for r in self.hidden["hooks"]:
@@ -165,8 +262,6 @@ class ScanTest(unittest.TestCase):
                          len(self.data["configured_but_unobserved"]))
 
     def test_redact_keeps_the_argument_that_tells_two_hooks_apart(self):
-        sys.path.insert(0, os.path.dirname(SCAN))
-        import scan
         self.assertEqual(scan.redact('/usr/bin/python3 "$HOME/h/notify.py" busy'),
                          "notify.py busy")
         self.assertEqual(scan.redact('bash "/opt/example/run.sh"'), "run.sh")
@@ -177,6 +272,32 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(scan.redact('python3 -c "import os"'), "<inline script>")
         self.assertEqual(scan.redact('python3 -c "print(1); print(TOKEN)"'),
                          "<inline shell>")
+
+    # --- refusing to produce a confident report from an input it could not read ---
+
+    def test_a_settings_path_that_does_not_exist_is_an_error(self):
+        p = run(self.tmp.name, "--settings",
+                os.path.join(self.tmp.name, "typo.json"), check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn(b"not found", p.stderr)
+
+    def test_a_project_that_is_not_a_directory_is_an_error(self):
+        p = run(self.tmp.name, "--project",
+                os.path.join(self.tmp.name, "nope"), check=False)
+        self.assertNotEqual(p.returncode, 0)
+
+    def test_a_negative_file_count_is_an_error(self):
+        p = run(self.tmp.name, "--files", "-5", check=False)
+        self.assertNotEqual(p.returncode, 0)
+
+    def test_settings_that_do_not_parse_are_reported(self):
+        home = tempfile.mkdtemp()
+        cfg = build(home)
+        with open(os.path.join(cfg, "settings.json"), "w", encoding="utf-8") as f:
+            f.write('{"hooks": {},}')          # the classic trailing comma
+        data = json.loads(run(home, "--json").stdout.decode())
+        self.assertTrue(data["problems"], "a settings file that failed to parse was silent")
+        self.assertIn("could not read", run(home).stdout.decode())
 
 
 if __name__ == "__main__":

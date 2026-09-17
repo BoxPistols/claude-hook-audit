@@ -3,8 +3,9 @@
 
 Claude Code records every hook run it reports as an attachment entry carrying
 durationMs, and records timeouts with timedOut/timeoutMs. This reads those
-entries, ranks hooks by total blocking time, and cross-references the settings
-cascade and the installed plugins to say which of them actually block the loop.
+entries, ranks hooks by the time they held up the main session, and
+cross-references the settings cascade and the installed plugins to say which of
+them block the loop at all.
 
 usage: hook-audit [--root DIR] [--settings FILE ...] [--project DIR] [--files N]
                   [--redact] [--json]
@@ -13,33 +14,45 @@ import argparse
 import collections
 import datetime
 import json
+import math
 import os
+import re
 import shlex
 import statistics
 import sys
 
-HOOK_TYPES = ("hook_success", "hook_non_blocking_error",
-              "hook_error_during_execution", "hook_cancelled")
+# Outcomes Claude Code writes. Anything else starting with hook_ is counted and
+# reported as unrecognized rather than dropped: this reads a format it does not own.
+SUCCESS = "hook_success"
+CANCELLED = "hook_cancelled"
+BLOCKED = "hook_blocking_error"          # the hook exited 2 and stopped the tool call
+CONTEXT = "hook_additional_context"      # injected context, carries no hook identity
 
-# Rules of thumb. A hook on a per-tool-call event blocks the loop every time it fires.
+# A hook on a per-tool-call event blocks the loop every time it fires.
 PER_CALL_EVENTS = {"PreToolUse", "PostToolUse", "UserPromptSubmit",
                    "PermissionRequest", "PermissionDenied", "PostToolUseFailure"}
 
+P95_MIN_RUNS = 20   # below this a 95th percentile is just the maximum
 CMD_W = 96          # one truncation width for every place a command is printed
 SHELL_CHARS = ("|", ";", "&&", "$(", "`", ">", "<")
 INTERPRETERS = {"python", "python3", "node", "bash", "sh", "zsh", "env", "perl",
                 "ruby", "deno", "bun", "npx", "uv", "uvx"}
+BLOCKED_CMD = re.compile(r"^\[(.+?)\]:\s", re.S)
 
 
 def config_dir():
-    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    return os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")
 
 
-def load_json(path):
+def load_json(path, problems=None):
+    """None on failure. Appends to problems, because a settings file that exists
+    and does not parse inverts the whole report and has to be said out loud."""
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except Exception as exc:
+        if problems is not None:
+            problems.append("%s: %s" % (path, exc))
         return None
 
 
@@ -71,8 +84,8 @@ def redact(s):
     return " ".join(words)
 
 
-def plugin_hook_sources(cascade):
-    """(path, origin, enabled) for the hooks.json of every installed plugin.
+def plugin_hook_sources(cascade, problems):
+    """(path, origin, enabled, root) for the hooks.json of every installed plugin.
 
     A plugin declares its hooks in its own file rather than in settings.json, so
     without these every plugin hook reads as blocking with no timeout.
@@ -81,12 +94,13 @@ def plugin_hook_sources(cascade):
     made while it was on. It is marked not enabled so it stays out of the list of
     configured hooks that were never observed.
     """
-    reg = load_json(os.path.join(config_dir(), "plugins", "installed_plugins.json"))
+    path = os.path.join(config_dir(), "plugins", "installed_plugins.json")
+    reg = load_json(path, problems) if os.path.exists(path) else None
     if not isinstance(reg, dict):
         return []
     enabled = {}
     for p in cascade:
-        d = load_json(p)
+        d = load_json(p, problems)
         if isinstance(d, dict) and isinstance(d.get("enabledPlugins"), dict):
             enabled.update(d["enabledPlugins"])
     out = []
@@ -99,25 +113,27 @@ def plugin_hook_sources(cascade):
             if not isinstance(root, str):
                 continue
             f = os.path.join(root, "hooks", "hooks.json")
-            src = (f, key, on)
+            src = (f, key, on, root)
             if os.path.exists(f) and src not in out:
                 out.append(src)
     return out
 
 
-def settings_index(sources):
-    """(path, origin, enabled) sources -> {(event, key): meta}
+def settings_index(sources, problems):
+    """(path, origin, enabled, root) sources -> {(event, key): meta}
 
     key is the hook's command string and, when it has one, its statusMessage.
     Claude Code writes statusMessage into the transcript in place of the command,
-    so a hook with one never matches on its command alone.
+    so a hook with one never matches on its command alone. A plugin command is
+    also indexed with ${CLAUDE_PLUGIN_ROOT} expanded, because a blocked tool call
+    is recorded with that variable already resolved.
 
     Keyed per event because async and timeout are properties of the entry, not of
     the command: the same script can be async on one event and blocking on another.
     """
     idx = {}
-    for path, origin, enabled in sources:
-        data = load_json(path)
+    for path, origin, enabled, root in sources:
+        data = load_json(path, problems)
         if not isinstance(data, dict):
             continue
         for event, groups in (data.get("hooks") or {}).items():
@@ -136,38 +152,55 @@ def settings_index(sources):
                     label = h.get("statusMessage")
                     if isinstance(label, str) and label:
                         keys.append(label)
+                    if root and "CLAUDE_PLUGIN_ROOT" in cmd:
+                        keys.append(cmd.replace("${CLAUDE_PLUGIN_ROOT}", root)
+                                       .replace("$CLAUDE_PLUGIN_ROOT", root))
                     for k in keys:
                         e = idx.setdefault((event, k), {
-                            "command": cmd, "async": False, "timeout": None,
+                            "command": cmd, "async": False, "timeout_s": None,
                             "enabled": False, "matchers": set(), "origins": set()})
                         e["enabled"] = e["enabled"] or enabled
                         e["async"] = e["async"] or bool(h.get("async"))
                         if h.get("timeout") is not None:
-                            e["timeout"] = h["timeout"]
+                            e["timeout_s"] = h["timeout"]   # settings are in seconds
                         e["matchers"].add(g.get("matcher") or "*")
                         e["origins"].add(origin)
     return idx
 
 
-def iter_files(root, limit):
+def iter_files(root, limit, problems):
     found = []
-    for dirpath, _, names in os.walk(root):
+
+    def onerror(exc):
+        problems.append("%s: %s" % (getattr(exc, "filename", root), exc))
+
+    for dirpath, _, names in os.walk(root, onerror=onerror):
         for n in names:
             if n.endswith(".jsonl"):
                 p = os.path.join(dirpath, n)
                 try:
                     found.append((os.path.getmtime(p), p))
-                except OSError:
-                    pass
+                except OSError as exc:
+                    problems.append("%s: %s" % (p, exc))
     found.sort(reverse=True)
     return found[:limit] if limit else found
 
 
+def blocked_command(a):
+    """hook_blocking_error carries no command field. The message it does carry is
+    prefixed with the command in brackets, which is the only identity available."""
+    be = a.get("blockingError")
+    text = be.get("blockingError") if isinstance(be, dict) else be
+    m = BLOCKED_CMD.match(text) if isinstance(text, str) else None
+    return m.group(1) if m else None
+
+
 def collect(files):
-    runs = collections.defaultdict(list)          # (event, command) -> [durationMs]
+    runs = collections.defaultdict(list)          # (event, cmd) -> [(ms, sidechain)]
     outcomes = collections.defaultdict(collections.Counter)
     timeouts = collections.Counter()
     timeout_ms = {}
+    unattributed = collections.Counter()          # type -> runs with no identity
     for _, path in files:
         try:
             fh = open(path, encoding="utf-8", errors="replace")
@@ -185,47 +218,73 @@ def collect(files):
                     continue
                 a = o.get("attachment") or {}
                 kind = a.get("type")
-                if kind not in HOOK_TYPES:
+                if not isinstance(kind, str) or not kind.startswith("hook_"):
                     continue
-                key = (a.get("hookEvent") or "?", a.get("command") or "?")
+                cmd = a.get("command")
+                if not isinstance(cmd, str) and kind == BLOCKED:
+                    cmd = blocked_command(a)
+                if not isinstance(cmd, str) or not cmd:
+                    unattributed[kind] += 1
+                    continue
+                key = (a.get("hookEvent") or "?", cmd)
                 outcomes[key][kind] += 1
                 d = a.get("durationMs")
                 if isinstance(d, (int, float)):
-                    runs[key].append(d)
-                # A user-Esc cancellation lacks timedOut and says nothing about speed.
-                if kind == "hook_cancelled" and a.get("timedOut"):
+                    # A run inside a subagent did not hold up the main session: those
+                    # run in parallel with each other and with the main loop.
+                    runs[key].append((d, bool(o.get("isSidechain"))))
+                # timedOut is present on every cancellation. False is the user
+                # pressing Esc, which says nothing about how fast the hook is.
+                if a.get("timedOut"):
                     timeouts[key] += 1
                     if a.get("timeoutMs"):
                         timeout_ms[key] = a["timeoutMs"]
-    return runs, outcomes, timeouts, timeout_ms
+    return runs, outcomes, timeouts, timeout_ms, unattributed
+
+
+def percentile(arr, q):
+    """Nearest-rank on a sorted list. Returns None when there is nothing to rank."""
+    if not arr:
+        return None
+    return arr[max(0, min(len(arr) - 1, int(math.ceil(q * len(arr))) - 1))]
 
 
 def build_rows(runs, outcomes, timeouts, cfg, hide):
     rows = []
-    for key, arr in runs.items():
-        arr.sort()
+    for key in set(runs) | set(outcomes):
+        pairs = runs.get(key) or []
+        main = sorted(d for d, side in pairs if not side)
+        sub = sorted(d for d, side in pairs if side)
+        every = sorted(d for d, _ in pairs)
         meta = cfg.get(key) or {}
-        known = key in cfg
-        med = statistics.median(arr)
+        counts = outcomes.get(key) or {}
         rows.append({
             "event": key[0],
             "command": redact(key[1]) if hide else key[1],
-            "runs": len(arr),
-            "median_ms": round(med),
-            "p95_ms": round(arr[min(len(arr) - 1, int(len(arr) * 0.95))]),
-            "max_ms": round(arr[-1]),
-            "total_blocking_ms": round(len(arr) * med) if not meta.get("async") else 0,
-            "total_ms": round(len(arr) * med),
+            "runs": len(every),
+            "subagent_runs": len(sub),
+            "median_ms": round(statistics.median(every)) if every else None,
+            # A 95th percentile of fewer than P95_MIN_RUNS samples is the maximum.
+            "p95_ms": (round(percentile(every, 0.95))
+                       if len(every) >= P95_MIN_RUNS else None),
+            "max_ms": round(every[-1]) if every else None,
+            # Exact sums. runs x median understates a right-skewed latency by tens
+            # of percent, and every sample is already in hand.
+            "main_total_ms": round(sum(main)),
+            "subagent_total_ms": round(sum(sub)),
+            "total_ms": round(sum(every)),
+            "total_blocking_ms": 0 if meta.get("async") else round(sum(main)),
             "timeouts": timeouts.get(key, 0),
-            "timeout_setting": meta.get("timeout"),
+            "blocked_calls": counts.get(BLOCKED, 0),
+            "timeout_s": meta.get("timeout_s"),
             "is_async": bool(meta.get("async")),
-            "in_settings": known,
+            "in_settings": key in cfg,
             "origins": sorted(meta.get("origins") or []),
-            "failures": outcomes[key].get("hook_error_during_execution", 0)
-                        + outcomes[key].get("hook_non_blocking_error", 0),
+            "other_outcomes": {k: v for k, v in counts.items()
+                               if k not in (SUCCESS, CANCELLED, BLOCKED, CONTEXT)},
             "_key": key,
         })
-    rows.sort(key=lambda r: (-r["total_blocking_ms"], -r["total_ms"]))
+    rows.sort(key=lambda r: (-r["total_blocking_ms"], -r["total_ms"], r["event"]))
     return rows
 
 
@@ -255,36 +314,54 @@ def unobserved(cfg, observed):
 
 def main():
     ap = argparse.ArgumentParser(prog="hook-audit")
-    ap.add_argument("--root", default=os.path.join(config_dir(), "projects"),
-                    help="transcript directory")
+    ap.add_argument("--root", default=None, help="transcript directory")
     ap.add_argument("--settings", action="append", default=[],
                     help="extra settings file to read (repeatable)")
     ap.add_argument("--project", default=None,
                     help="project dir whose .claude/settings*.json to include")
     ap.add_argument("--files", type=int, default=0,
-                    help="read only the N most recently modified transcripts")
+                    help="read only the N most recently modified transcripts "
+                         "(default: all of them)")
     ap.add_argument("--redact", action="store_true",
                     help="print basenames and labels instead of full commands, "
                          "for a report that leaves this machine")
     ap.add_argument("--json", action="store_true", help="emit JSON instead of a report")
     args = ap.parse_args()
 
-    files = iter_files(args.root, args.files)
-    if not files:
-        sys.exit("no transcripts found under %s" % args.root)
+    if args.files < 0:
+        ap.error("--files must be 0 or more")
+    problems = []
+    root = os.path.expanduser(args.root or os.path.join(config_dir(), "projects"))
 
-    cascade = [os.path.join(config_dir(), "settings.json"),
-               os.path.join(config_dir(), "settings.local.json")]
+    # An implicit cascade member is skipped when absent. A path the user asked for
+    # is not: dropping it silently produces a report in which nothing is configured.
+    cascade = [p for p in (os.path.join(config_dir(), "settings.json"),
+                           os.path.join(config_dir(), "settings.local.json"))
+               if os.path.exists(p)]
+    asked = [os.path.expanduser(p) for p in args.settings]
     if args.project:
-        cascade += [os.path.join(args.project, ".claude", "settings.json"),
-                    os.path.join(args.project, ".claude", "settings.local.json")]
-    cascade += args.settings
-    cascade = [p for p in cascade if os.path.exists(p)]
-    sources = [(p, os.path.basename(p), True) for p in cascade]
-    sources += plugin_hook_sources(cascade)
-    cfg = settings_index(sources)
+        project = os.path.expanduser(args.project)
+        if not os.path.isdir(project):
+            sys.exit("--project is not a directory: %s" % project)
+        cascade += [p for p in (os.path.join(project, ".claude", "settings.json"),
+                                os.path.join(project, ".claude", "settings.local.json"))
+                    if os.path.exists(p)]
+    for p in asked:
+        if not os.path.exists(p):
+            sys.exit("--settings file not found: %s" % p)
+    cascade += asked
 
-    runs, outcomes, timeouts, timeout_ms = collect(files)
+    files = iter_files(root, args.files, problems)
+    if not files:
+        for p in problems:
+            print("warning: %s" % p, file=sys.stderr)
+        sys.exit("no transcripts found under %s" % root)
+
+    sources = [(p, os.path.basename(p), True, None) for p in cascade]
+    sources += plugin_hook_sources(cascade, problems)
+    cfg = settings_index(sources, problems)
+
+    runs, outcomes, timeouts, timeout_ms, unattributed = collect(files)
     rows = build_rows(runs, outcomes, timeouts, cfg, args.redact)
     silent = unobserved(cfg, set(runs) | set(outcomes))
     show = redact if args.redact else (lambda c: c)
@@ -292,10 +369,15 @@ def main():
     span_days = (files[0][0] - files[-1][0]) / 86400
 
     if args.json:
-        json.dump({"window": {"transcripts": len(files), "days": round(span_days, 2)},
+        json.dump({"window": {"transcripts": len(files), "days": round(span_days, 2),
+                              "from": files[-1][0], "to": files[0][0]},
                    "redacted": args.redact,
-                   "sources": [o for _, o, _ in sources],
-                   "hooks": [{k: v for k, v in r.items() if k != "_key"} for r in rows],
+                   "sources": [o for _, o, _, _ in sources],
+                   "problems": problems,
+                   "unattributed_records": dict(unattributed),
+                   "hooks": [dict([(k, v) for k, v in r.items() if k != "_key"],
+                                  timeout_observed_ms=timeout_ms.get(r["_key"]))
+                             for r in rows],
                    "configured_but_unobserved": [show(c) for c in silent]},
                   sys.stdout, indent=2, ensure_ascii=False)
         print()
@@ -304,23 +386,42 @@ def main():
     def when(ts):
         return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
+    def ms(v):
+        return "%6dms" % v if v is not None else "%8s" % "-"
+
     print("Window: %d transcripts, %s - %s (%.1f days)"
           % (len(files), when(files[-1][0]), when(files[0][0]), span_days))
     print("Transcripts older than your cleanupPeriodDays are gone; nothing before the "
-          "window can be judged from this.\n")
+          "window can be judged from this.")
+    for p in problems:
+        print("warning: could not read %s" % p)
+    print()
 
     blocking = [r for r in rows if not r["is_async"]]
     total_block = sum(r["total_blocking_ms"] for r in blocking)
-    print("Blocking hooks cost at least %.1f minutes over this window (%d of %d observed "
-          "hooks block)." % (total_block / 60000, len(blocking), len(rows)))
-    print("  A floor, not a total: a hook that succeeds with empty output is never")
-    print("  persisted, and %d configured hooks were not observed at all." % len(silent))
+    sub_total = sum(r["subagent_total_ms"] for r in rows)
+    print("Blocking hooks held up the main session for at least %.1f minutes over this "
+          "window" % (total_block / 60000))
+    print("  (%d of %d observed event/hook pairs block). A floor, not a total: a hook"
+          % (len(blocking), len(rows)))
+    print("  that succeeds with empty output is never persisted, and %d configured hooks"
+          % len(silent))
+    print("  were not observed at all.")
+    if sub_total:
+        print("  A further %.1f minutes of hook time ran inside subagents. Those run in "
+              "parallel" % (sub_total / 60000))
+        print("  with each other and with the main loop, so it is not time you waited.")
     if unknown:
         one = len(unknown) == 1
         print("  %d observed hook%s (marked ?) %s in neither the settings cascade nor"
               % (len(unknown), "" if one else "s", "is" if one else "are"))
         print("  an installed plugin, so %s counted as blocking, which may be wrong."
               % ("it is" if one else "they are"))
+    if unattributed:
+        n = sum(unattributed.values())
+        print("  %d record%s name%s no command and could not be attributed to a hook: %s."
+              % (n, "" if n == 1 else "s", "s" if n == 1 else "",
+                 ", ".join("%s x%d" % kv for kv in sorted(unattributed.items()))))
     print()
 
     def marks(r):
@@ -333,45 +434,65 @@ def main():
         print(title)
         if note:
             print("  %s" % note)
-        print("  %8s  %6s  %8s  %8s  %9s  event" % ("total", "runs", "median", "p95", "max"))
+        print("  %8s  %6s  %8s  %8s  %9s  event"
+              % ("main", "runs", "median", "p95", "max"))
         for r in subset:
-            print("  %7.1fm  %6d  %6dms  %6dms  %7dms  %s"
-                  % (r["total_ms"] / 60000, r["runs"], r["median_ms"], r["p95_ms"],
-                     r["max_ms"], r["event"]))
+            print("  %7.1fm  %6d  %s  %s  %s  %s"
+                  % (r["main_total_ms"] / 60000, r["runs"], ms(r["median_ms"]),
+                     ms(r["p95_ms"]), ms(r["max_ms"]).rjust(9), r["event"]))
             print("  %2s        %s" % (marks(r), r["command"][:CMD_W]))
+            if r["subagent_runs"]:
+                print("            + %d of those runs were inside subagents (%.1fm, "
+                      "in parallel)" % (r["subagent_runs"],
+                                        r["subagent_total_ms"] / 60000))
         print()
 
-    table("BLOCKING  (total = runs x median; a fast hook still costs if it fires often)",
-          blocking, "* fires on every tool call or prompt, so it blocks the loop each time")
+    table("BLOCKING  (main = time the main session spent waiting, summed over its runs)",
+          [r for r in blocking if r["runs"]],
+          "* fires on every tool call or prompt, so it blocks the loop each time. "
+          "p95 needs %d runs" % P95_MIN_RUNS)
     table("NON-BLOCKING  (async; listed for reference, this time is not spent waiting)",
-          [r for r in rows if r["is_async"]])
+          [r for r in rows if r["is_async"] and r["runs"]])
 
-    hang = [r for r in rows if not r["is_async"] and r["timeout_setting"] is None]
+    # A hook whose real limit was observed is not a hook with an unknown ceiling.
+    hang = [r for r in blocking
+            if r["runs"] and r["timeout_s"] is None and r["_key"] not in timeout_ms]
     if hang:
-        print("BLOCKING WITH NO EXPLICIT TIMEOUT")
+        print("BLOCKING WITH NO KNOWN TIMEOUT")
         print("  These fall back to the event default, which can be minutes. One "
               "unresponsive dependency stalls the loop for that long.")
         for r in hang:
-            seen = timeout_ms.get(r["_key"])
-            limit = "  default limit seen: %sms" % seen if seen else ""
-            print("  [%s] max seen %dms%s  %s"
-                  % (r["event"], r["max_ms"], limit, r["command"][:CMD_W]))
+            print("  [%s] max seen %s  %s"
+                  % (r["event"], ms(r["max_ms"]).strip(), r["command"][:CMD_W]))
         print()
 
     to = [r for r in rows if r["timeouts"]]
     if to:
-        print("TIMED OUT (ran until the timeout fired; durationMs is a floor)")
+        print("TIMED OUT (ran until the limit fired; durationMs is a floor, and can "
+              "overshoot it)")
         for r in sorted(to, key=lambda r: -r["timeouts"]):
-            lim = timeout_ms.get(r["_key"])
-            print("  %dx  [%s] limit=%sms  %s"
-                  % (r["timeouts"], r["event"], lim, r["command"][:CMD_W]))
+            print("  %dx  [%s] limit=%sms%s  %s"
+                  % (r["timeouts"], r["event"], timeout_ms.get(r["_key"]),
+                     "" if r["timeout_s"] is not None else " (not set; event default)",
+                     r["command"][:CMD_W]))
         print()
 
-    fail = [r for r in rows if r["failures"]]
-    if fail:
-        print("ERRORS")
-        for r in sorted(fail, key=lambda r: -r["failures"]):
-            print("  %dx  [%s] %s" % (r["failures"], r["event"], r["command"][:CMD_W]))
+    stopped = [r for r in rows if r["blocked_calls"]]
+    if stopped:
+        print("STOPPED A TOOL CALL (hook exited 2)")
+        print("  Expected from a gate that is doing its job. From a reporting hook it "
+              "is a bug, and it costs a retry every time.")
+        for r in sorted(stopped, key=lambda r: -r["blocked_calls"]):
+            print("  %dx  [%s] %s" % (r["blocked_calls"], r["event"],
+                                      r["command"][:CMD_W]))
+        print()
+
+    odd = [r for r in rows if r["other_outcomes"]]
+    if odd:
+        print("UNRECOGNIZED OUTCOMES (this reads a format it does not own)")
+        for r in odd:
+            print("  [%s] %s  %s" % (r["event"], r["other_outcomes"],
+                                     r["command"][:CMD_W]))
         print()
 
     if silent:

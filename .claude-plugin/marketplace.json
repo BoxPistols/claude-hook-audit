@@ -9,7 +9,7 @@
     {
       "name": "hook-audit",
       "source": "./",
-      "description": "Profile Claude Code hooks from transcripts that already exist. Ranks hooks by total blocking time, separates blocking from async, finds hangs and timeouts."
+      "description": "Profile Claude Code hooks from transcripts that already exist. Ranks hooks by main-session blocking time, separates subagent runs, finds hangs, timeouts and blocked tool calls."
     }
   ]
 }

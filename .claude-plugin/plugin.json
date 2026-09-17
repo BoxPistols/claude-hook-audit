@@ -1,7 +1,7 @@
 {
   "name": "hook-audit",
-  "description": "Profile Claude Code hooks from transcripts that already exist. Ranks hooks by total blocking time, separates blocking from async, finds hangs and timeouts.",
-  "version": "0.1.0",
+  "description": "Profile Claude Code hooks from transcripts that already exist. Ranks hooks by the time they held up the main session, separates subagent runs, finds hangs, timeouts and blocked tool calls.",
+  "version": "0.2.0",
   "author": {
     "name": "BoxPistols"
   },

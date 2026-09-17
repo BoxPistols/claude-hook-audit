@@ -6,33 +6,43 @@ writes `durationMs` for every hook run it reports, and `timedOut` / `timeoutMs` 
 hits its limit. This reads that.
 
 ```
-Window: 213 transcripts, 2026-09-10 11:31 - 2026-09-17 23:25 (7.4 days)
+Window: 231 transcripts, 2026-09-10 11:31 - 2026-09-18 07:20 (7.8 days)
 
-Blocking hooks cost at least 36.2 minutes over this window (6 of 9 observed hooks block).
-  A floor, not a total: a hook that succeeds with empty output is never persisted, and
-  15 configured hooks were not observed at all.
+Blocking hooks held up the main session for at least 25.0 minutes over this window
+  (6 of 15 observed event/hook pairs block). A floor, not a total: a hook
+  that succeeds with empty output is never persisted, and 15 configured hooks
+  were not observed at all.
+  A further 45.8 minutes of hook time ran inside subagents. Those run in parallel
+  with each other and with the main loop, so it is not time you waited.
 
-BLOCKING  (total = runs x median; a fast hook still costs if it fires often)
-  * fires on every tool call or prompt, so it blocks the loop each time
-     total    runs    median       p95        max  event
-     17.6m    3662     297ms    1233ms     9045ms  PreToolUse
+BLOCKING  (main = time the main session spent waiting, summed over its runs)
+  * fires on every tool call or prompt, so it blocks the loop each time. p95 needs 20 runs
+      main    runs    median       p95        max  event
+     12.7m    4644     296ms    1164ms     9045ms  PreToolUse
   *         [status line updater]
-     18.0m    3584     303ms    1242ms     4052ms  PostToolUse
+            + 2388 of those runs were inside subagents (22.7m, in parallel)
+     12.3m    4542     302ms    1190ms     5277ms  PostToolUse
   *         [status line updater]
+            + 2335 of those runs were inside subagents (22.8m, in parallel)
 
-BLOCKING WITH NO EXPLICIT TIMEOUT
-  [PreToolUse] max seen 777576ms  default limit seen: 600000ms  [desktop widget hook]
+BLOCKING WITH NO KNOWN TIMEOUT
+  [PreToolUse] max seen 777576ms  [desktop widget hook]
 
-TIMED OUT (ran until the timeout fired; durationMs is a floor)
-  2x  [PreToolUse] limit=600000ms  [desktop widget hook]
+TIMED OUT (ran until the limit fired; durationMs is a floor, and can overshoot it)
+  2x  [PreToolUse] limit=600000ms (not set; event default)  [desktop widget hook]
 ```
 
-Hook names are in brackets here because this sample is edited. A real run prints the
-command; `--redact` prints the script basename and its arguments.
+Only the hook names are edited here, to brackets. A real run prints the command;
+`--redact` prints the script basename and its arguments.
 
-Two hooks that each look fine at 300ms were costing half an hour a week. Both only
-updated a status display, so neither needed to block. Marking them `"async": true`
-removed the wait without losing a single status update.
+Two hooks that each look fine at 300ms were costing 25 minutes of waiting a week.
+Both only updated a status display, so neither needed to block. Marking them
+`"async": true` removed the wait without losing a single status update.
+
+Note the second number. Another 45 minutes of the same hooks ran inside subagents,
+where they hold up that subagent and nothing else: subagents run concurrently with
+each other and with the main loop, so adding that time to the total would describe
+waiting that never happened. The report keeps the two apart.
 
 ## Install
 
@@ -55,19 +65,31 @@ changes nothing on its own.
 
 | Section | What it answers |
 |---|---|
-| Ranked by total blocking time | `runs x median`. Catches the cheap hook that fires thousands of times |
+| Ranked by main-session total | Summed durations, main session only. Catches the cheap hook that fires thousands of times |
 | Blocking vs async | Which of these are actually costing you wall clock |
-| No explicit timeout | Which blocking hooks can stall for the event default, often minutes |
-| Timed out | Which hooks ran until their limit fired. `durationMs` there is a floor |
-| Errors | Hooks failing rather than just being slow |
+| Subagent runs, per hook | How much of that time was inside a subagent, where it overlaps instead of accumulating |
+| No known timeout | Which blocking hooks can stall for the event default, often minutes |
+| Timed out | Which hooks ran until their limit fired. `durationMs` there is a floor, and can overshoot the limit |
+| Stopped a tool call | Which hooks exited 2. Expected from a gate, a bug plus a retry from a reporter |
+| Unrecognized outcomes | Record types this scanner does not know about, rather than silence |
 | Configured but not observed | Quiet hooks. A hook that succeeds with empty output is never persisted, so a zero here is the absence of logging, not evidence |
 
 ## Why total instead of p95
 
 The usual advice is a per-call ceiling: warn above 2 seconds. That misses the shape of
-cost that actually hurts. A 290ms hook on `PreToolUse` fires on every tool call. At
-7,000 calls a week that is 34 minutes of blocked loop, and every single run looks
-healthy. Ranking by `runs x median` surfaces it immediately.
+cost that actually hurts. A 296ms hook on `PreToolUse` fires on every tool call. At
+4,600 calls a week that is 12 minutes of blocked loop per event it is attached to, and
+every single run looks healthy. Ranking by total surfaces it immediately.
+
+The total is the sum of the recorded durations, not `runs x median`. On real
+right-skewed latency the median estimator was 28% low across the corpus this was
+developed against, and 35% low on the two hooks that mattered most, because it throws
+away every sample above the middle one. Every sample is already in hand, so the exact
+sum is free.
+
+`p95` is only printed at 20 runs or more. Below that, nearest-rank puts the 95th
+percentile on the largest sample, so it would be the `max` column under a different
+name.
 
 ## What it can and cannot see
 
@@ -76,17 +98,27 @@ that succeeds with empty output is not persisted. The report says how many confi
 hooks it never saw.
 
 To decide whether a run blocked the loop, the scanner matches each run against the hook
-that produced it. Two things make that matching non-obvious, and both are handled:
+that produced it. Four things make that matching non-obvious, and all four are handled:
 
 - A hook with a `statusMessage` is recorded under that message, not under its command.
-  Matching on the command alone reports such a hook twice: once as "never observed", and
-  once as an unrecognized entry assumed to be blocking with no timeout.
 - A plugin declares its hooks in its own `hooks/hooks.json`, not in `settings.json`. Those
   are read too, including for a plugin turned off since, because the window still holds
   the runs it made while it was on.
+- A hook that stopped a tool call by exiting 2 is recorded with no `command` field and no
+  `durationMs`. The command is recoverable from the message it does carry, so those runs
+  are attributed rather than dropped, and they get a row even with no timing.
+- A plugin command can be recorded with `${CLAUDE_PLUGIN_ROOT}` already expanded, so both
+  forms are indexed.
 
 Anything still unmatched is marked `?` in the report and counted as blocking, which is the
-conservative reading, not a measurement.
+conservative reading, not a measurement. Records that name no hook at all are counted and
+named rather than silently dropped, and an outcome type this scanner does not recognize is
+reported as such: this reads a format it does not own.
+
+A file it could not read, and a settings file that exists but does not parse, are reported
+as warnings. An empty configuration would otherwise produce a confident report in which
+nothing is async and nothing has a timeout. A `--settings` or `--project` path that does
+not exist is an error rather than a warning.
 
 ## Sharing a report
 
@@ -124,8 +156,11 @@ and MCP servers. This project deliberately does not overlap with it.
   the window. After changing a hook, its past runs still appear under the new mode.
 - Transcript retention is capped by `cleanupPeriodDays`. Nothing before that window can
   be judged from this data, and the report says so.
-- `--json` emits the same data for scripting. `--files N` limits the window to the N most
-  recent transcripts.
+- `--json` emits the same data for scripting, including the window bounds, the observed
+  timeout limit per hook, unread files and unattributed records. `--files N` limits the
+  window to the N most recent transcripts, newest first by modification time.
+- A timeout in `settings.json` is in seconds; everything a transcript records is in
+  milliseconds. The JSON keeps them as `timeout_s` and `timeout_observed_ms`.
 - Read from the settings cascade: `~/.claude/settings.json`, `settings.local.json`, the
   project's `.claude/settings*.json` with `--project`, any `--settings FILE`, and the
   `hooks/hooks.json` of each installed plugin.
@@ -136,9 +171,9 @@ and MCP servers. This project deliberately does not overlap with it.
 python3 -m unittest discover -s tests
 ```
 
-The tests run the scanner against a synthetic config directory. They cover the two
-matching cases above, per-event `async`, timeout versus user cancellation, and that
-`--redact` leaks no path.
+The tests run the scanner against a synthetic config directory whose records reproduce
+each shape described above. Each one was checked by reverting the behavior it covers and
+confirming the suite fails.
 
 ## License
 
@@ -152,9 +187,11 @@ Claude Codeのフックを、**既にあるログから**後追いで計測し�
 
 ## これが解く問題
 
-1回あたり290msのフックは、どの基準でも「速い」に見えます。それが`PreToolUse`に付いていて週7,000回発火すると、**34分ぶんループが止まります**。1回の速さだけを見ていると気づけません。
+1回あたり296msのフックは、どの基準でも「速い」に見えます。それが`PreToolUse`に付いていて週4,600回発火すると、**12分ぶんループが止まります**。同じものが`PostToolUse`にも付いていれば倍です。1回の速さだけを見ていると気づけません。
 
-`発火回数 × 中央値` で並べ替えると、これが最上位に出ます。
+合計時間で並べ替えると、これが最上位に出ます。合計は記録された所要時間の実測和で、`発火回数 × 中央値`ではありません。中央値を使うと、開発時に使った実データでは全体で28%、影響の大きい2件では35%低く出ました。中央値より上の標本を全部捨てるためです。標本は全部手元にあるので、正確な和を取るほうが安いです。
+
+`p95`は20件以上のときだけ出します。それ未満では最近傍順位の95パーセンタイルが最大値そのものになるため、`max`列と同じ数字を別の名前で出すことになります。
 
 ## 導入
 
@@ -176,16 +213,24 @@ Python 3.9以上、依存なし。ローカルのファイルを読むだけで�
 | エラー | 遅いのではなく失敗しているもの |
 | 設定にあるが記録なし | 無音のフック。成功して出力が空のものはログに残らないため、ゼロは「記録が無い」であって「使われていない」ではない |
 
+## サブエージェントの実行を合計に入れない
+
+サブエージェント内で動いたフックは、そのサブエージェントを止めますが、利用者を待たせてはいません。サブエージェントは互いに、そしてメインのループと並行して走るためです。開発時のデータでは、所要時間の単純な和が90.1分に対し、実際に「いずれかのフックが走っていた」実時間の和は67.9分でした。上位2行では約半分がサブエージェント内の実行でした。合計に足すと、起きていない待ち時間を記述することになるので、分けて出します。
+
 ## 見えるものと見えないもの
 
 合計値は下限です。ログに永続化された実行しか入っておらず、成功して出力が空のフックは永続化されません。見えていない設定済みフックが何件あるかはレポートに出ます。
 
-ブロックしたかどうかの判定には、実行1件ごとに元のフック設定を突き合わせます。ここが素直でない点が2つあり、どちらも扱っています。
+ブロックしたかどうかの判定には、実行1件ごとに元のフック設定を突き合わせます。素直でない点が4つあり、すべて扱っています。
 
-- `statusMessage`を持つフックは、コマンドではなくそのメッセージでログに記録されます。コマンドだけで突き合わせると、同じフックが「記録なし」と「設定に無い(ブロック・タイムアウト未設定と仮定)」の2箇所に出ます
-- プラグインのフックは`settings.json`ではなくプラグイン自身の`hooks/hooks.json`に書かれています。こちらも読みます。後から無効化したプラグインも読みます(有効だった期間の実行がログに残っているため)
+- `statusMessage`を持つフックは、コマンドではなくそのメッセージでログに記録されます
+- プラグインのフックは`settings.json`ではなくプラグイン自身の`hooks/hooks.json`に書かれています。後から無効化したプラグインも読みます(有効だった期間の実行がログに残っているため)
+- 終了コード2でツール呼び出しを止めたフックは、`command`も`durationMs`も持ちません。メッセージ側にコマンドが入っているので、そこから復元して計上します。所要時間が無くても行として出します
+- プラグインのコマンドは`${CLAUDE_PLUGIN_ROOT}`が展開済みの形で記録されることがあるため、両方の形で索引します
 
-それでも突き合わせられなかったものは`?`を付け、ブロックとして数えます。これは安全側の仮定であって、計測結果ではありません。
+それでも突き合わせられなかったものは`?`を付け、ブロックとして数えます。これは安全側の仮定であって、計測結果ではありません。識別できない記録は件数と型名を出します。知らない型の記録も「知らない型」として報告します。自分が仕様を持っていない形式を読んでいるためです。
+
+読めなかったファイルと、存在するのにパースできない設定ファイルは警告として出します。黙って空の設定として扱うと、「どれも非同期でなく、どれもタイムアウト未設定」という確信のあるレポートが出てしまいます。`--settings`と`--project`に存在しないパスを渡した場合は警告ではなくエラーにします。
 
 ## レポートを人に渡すとき
 
