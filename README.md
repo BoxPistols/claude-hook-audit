@@ -6,7 +6,7 @@ writes `durationMs` for every hook run it reports, and `timedOut` / `timeoutMs` 
 hits its limit. This reads that.
 
 ```
-Window: 231 transcripts, 2026-09-10 11:31 - 2026-09-18 07:20 (7.8 days)
+Window: 63 sessions + 168 subagent transcripts, 2026-09-10 11:31 - 2026-09-18 07:20 (7.8 days)
 
 Blocking hooks held up the main session for at least 27.7 minutes over this window
   (10 of 15 observed event/hook pairs block). A floor, not a total: a hook
@@ -171,7 +171,9 @@ and MCP servers. This project deliberately does not overlap with it.
   be judged from this data, and the report says so.
 - `--json` emits the same data for scripting, including the window bounds, the observed
   timeout limit per hook, unread files and unattributed records. `--files N` limits the
-  window to the N most recent transcripts, newest first by modification time.
+  window to the N most recent transcript files, newest first by modification time.
+  Subagents write their own transcript files, and on a busy week they outnumber the
+  session ones, so a small `--files` covers fewer sessions than it looks like.
 - A timeout in `settings.json` is in seconds; everything a transcript records is in
   milliseconds. The JSON keeps them as `timeout_s` and `timeout_observed_ms`.
 - Read from the settings cascade: `~/.claude/settings.json`, `settings.local.json`, the

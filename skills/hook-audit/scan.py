@@ -168,6 +168,19 @@ def settings_index(sources, problems):
     return idx
 
 
+SUBAGENT_DIR = os.sep + "subagents" + os.sep
+
+
+def plural(n, word):
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+
+
+def is_subagent(path):
+    """Subagents write their own transcript, under a subagents/ directory. On a busy
+    week they outnumber the session transcripts, so the window says how many of each."""
+    return SUBAGENT_DIR in path
+
+
 def iter_files(root, limit, problems):
     found = []
 
@@ -321,8 +334,8 @@ def main():
     ap.add_argument("--project", default=None,
                     help="project dir whose .claude/settings*.json to include")
     ap.add_argument("--files", type=int, default=0,
-                    help="read only the N most recently modified transcripts "
-                         "(default: all of them)")
+                    help="read only the N most recently modified transcript files, "
+                         "subagent transcripts included (default: all of them)")
     ap.add_argument("--redact", action="store_true",
                     help="print basenames and labels instead of full commands, "
                          "for a report that leaves this machine")
@@ -367,10 +380,13 @@ def main():
     silent = unobserved(cfg, set(runs) | set(outcomes))
     show = redact if args.redact else (lambda c: c)
     unknown = [r for r in rows if not r["in_settings"]]
+    subagents = sum(1 for _, p in files if is_subagent(p))
     span_days = (files[0][0] - files[-1][0]) / 86400
 
     if args.json:
         json.dump({"window": {"transcripts": len(files), "days": round(span_days, 2),
+                              "sessions": len(files) - subagents,
+                              "subagent_transcripts": subagents,
                               "from": files[-1][0], "to": files[0][0]},
                    "redacted": args.redact,
                    "sources": [o for _, o, _, _ in sources],
@@ -390,8 +406,10 @@ def main():
     def ms(v):
         return "%6dms" % v if v is not None else "%8s" % "-"
 
-    print("Window: %d transcripts, %s - %s (%.1f days)"
-          % (len(files), when(files[-1][0]), when(files[0][0]), span_days))
+    print("Window: %s + %s, %s - %s (%.1f days)"
+          % (plural(len(files) - subagents, "session"),
+             plural(subagents, "subagent transcript"),
+             when(files[-1][0]), when(files[0][0]), span_days))
     print("Transcripts older than your cleanupPeriodDays are gone; nothing before the "
           "window can be judged from this.")
     for p in problems:

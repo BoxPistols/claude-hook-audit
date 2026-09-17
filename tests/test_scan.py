@@ -69,6 +69,10 @@ def rec(event, duration, command=None, kind="hook_success", sidechain=False, **e
                        "isSidechain": sidechain}) + "\n"
 
 
+def subagent_transcript():
+    return "".join(rec("SessionStart", 1000, REPORT, sidechain=True) for _ in range(5))
+
+
 def transcript(install):
     keeper_expanded = KEEPER.replace("${CLAUDE_PLUGIN_ROOT}", install)
     lines = []
@@ -86,10 +90,8 @@ def transcript(install):
     # Recorded under the statusMessage, not the command.
     lines.append(rec("PreToolUse", 120, "checking the write"))
     lines.append(rec("PreToolUse", 180, "checking the write"))
-    # One main-session run and five inside subagents.
+    # One main-session run; the five inside subagents live in their own transcript.
     lines.append(rec("SessionStart", 900, REPORT))
-    for _ in range(5):
-        lines.append(rec("SessionStart", 1000, REPORT, sidechain=True))
     # Blocked tool calls: no command field, no duration, command in the message.
     for _ in range(3):
         lines.append(rec("PostToolUse", None, kind="hook_blocking_error",
@@ -114,6 +116,10 @@ def build(home):
     with open(os.path.join(cfg, "projects", "example-project", "s.jsonl"), "w",
               encoding="utf-8") as f:
         f.write(transcript(install))
+    subdir = os.path.join(cfg, "projects", "example-project", "s", "subagents")
+    os.makedirs(subdir)
+    with open(os.path.join(subdir, "agent-1.jsonl"), "w", encoding="utf-8") as f:
+        f.write(subagent_transcript())
     with open(os.path.join(cfg, "settings.json"), "w", encoding="utf-8") as f:
         json.dump(SETTINGS, f)
     with open(os.path.join(install, "hooks", "hooks.json"), "w", encoding="utf-8") as f:
@@ -155,7 +161,12 @@ class ScanTest(unittest.TestCase):
 
     def test_tilde_in_config_dir_is_expanded(self):
         """Nothing else in this class runs if the default root did not resolve."""
-        self.assertEqual(self.data["window"]["transcripts"], 1)
+        self.assertEqual(self.data["window"]["transcripts"], 2)
+
+    def test_the_window_separates_sessions_from_subagent_transcripts(self):
+        self.assertEqual(self.data["window"]["sessions"], 1)
+        self.assertEqual(self.data["window"]["subagent_transcripts"], 1)
+        self.assertIn("1 session + 1 subagent transcript,", self.report)
 
     def test_status_message_resolves_to_its_hook(self):
         r = self.rows[("PreToolUse", "checking the write")]
