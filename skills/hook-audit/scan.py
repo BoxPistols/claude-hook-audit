@@ -38,6 +38,13 @@ SHELL_CHARS = ("|", ";", "&&", "$(", "`", ">", "<")
 INTERPRETERS = {"python", "python3", "node", "bash", "sh", "zsh", "env", "perl",
                 "ruby", "deno", "bun", "npx", "uv", "uvx"}
 BLOCKED_CMD = re.compile(r"^\[(.+?)\]:\s", re.S)
+# What --redact keeps of an argument. A credential rarely has either shape: a token
+# carries digits, and a header or a URL carries punctuation.
+PLAIN_ARG = re.compile(r"-{0,2}[A-Za-z][A-Za-z-]{0,23}")
+FILE_ARG = re.compile(r"[A-Za-z0-9_-]{1,40}\.[A-Za-z0-9]{1,5}")
+SECRET_FLAG = re.compile(r"-.*(token|key|secret|pass|auth|cred)", re.I)
+ENV_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+MASK = "…"
 
 
 def config_dir():
@@ -56,32 +63,49 @@ def load_json(path, problems=None):
         return None
 
 
-def redact(s):
+def redact(s, label=False):
     """A hook identity with the machine taken out of it, for a report you share.
 
-    Absolute paths carry the account name, and an inline shell hook or a -c script
-    can carry anything its author put in settings.json, including a token. Script
-    arguments are kept, because they are what distinguishes two hooks that run the
-    same script.
+    Absolute paths carry the account name, and a command can carry anything its
+    author put in settings.json, including a token passed as an argument or set in
+    front of it. The script's file name is kept, and so is an argument shaped like a
+    plain word or a file name, because those tell apart two hooks that run the same
+    script. Every other argument is masked, and so is the value after a flag named
+    like a credential. The masking goes by shape, not by recognizing a secret.
+
+    A statusMessage (label) is text its author chose to display, so it is returned
+    as written. Only the caller knows which strings are labels.
     """
+    if label:
+        return s
     if any(t in s for t in SHELL_CHARS):
         return "<inline shell>"
     try:
         words = shlex.split(s)
     except ValueError:
         words = s.split()
-    if not words:
-        return "<command>"
-    if "/" not in s and words[0] not in INTERPRETERS:
-        return s                            # a statusMessage, nothing in it to hide
-    words = [os.path.basename(w.rstrip("/")) if "/" in w else w for w in words]
-    while words and words[0] in INTERPRETERS:
-        words.pop(0)
+    while words and (os.path.basename(words[0]) in INTERPRETERS
+                     or ENV_ASSIGN.match(words[0])):
+        words.pop(0)                        # NAME=value in front is dropped whole
     if not words:
         return "<command>"
     if words[0].startswith("-"):
         return "<inline script>"            # -c and friends carry the whole script
-    return " ".join(words)
+    out = [os.path.basename(words[0].rstrip("/")) or words[0]]
+    after_secret = False
+    for w in words[1:]:
+        base = os.path.basename(w.rstrip("/")) if "/" in w else w
+        if after_secret or "://" in w:
+            out.append(MASK)
+        elif "=" in w:
+            name = w.split("=", 1)[0]
+            out.append(name + "=" + MASK if PLAIN_ARG.fullmatch(name) else MASK)
+        elif PLAIN_ARG.fullmatch(base) or FILE_ARG.fullmatch(base):
+            out.append(base)
+        else:
+            out.append(MASK)
+        after_secret = "=" not in w and bool(SECRET_FLAG.match(w))
+    return " ".join(out)
 
 
 def plugin_hook_sources(cascade, problems):
@@ -150,7 +174,9 @@ def settings_index(sources, problems):
                         continue
                     keys = [cmd]
                     label = h.get("statusMessage")
-                    if isinstance(label, str) and label:
+                    if not isinstance(label, str) or label == cmd:
+                        label = None
+                    if label:
                         keys.append(label)
                     if root and "CLAUDE_PLUGIN_ROOT" in cmd:
                         keys.append(cmd.replace("${CLAUDE_PLUGIN_ROOT}", root)
@@ -158,8 +184,11 @@ def settings_index(sources, problems):
                     for k in keys:
                         e = idx.setdefault((event, k), {
                             "command": cmd, "async": False, "timeout_s": None,
-                            "enabled": False, "matchers": set(), "origins": set()})
+                            "enabled": False, "matchers": set(), "origins": set(),
+                            "label": False})
                         e["enabled"] = e["enabled"] or enabled
+                        # Recorded under the statusMessage: --redact prints it as written.
+                        e["label"] = e["label"] or k == label
                         e["async"] = e["async"] or bool(h.get("async"))
                         if h.get("timeout") is not None:
                             e["timeout_s"] = h["timeout"]   # settings are in seconds
@@ -273,7 +302,7 @@ def build_rows(runs, outcomes, timeouts, cfg, hide):
         counts = outcomes.get(key) or {}
         rows.append({
             "event": key[0],
-            "command": redact(key[1]) if hide else key[1],
+            "command": redact(key[1], meta.get("label", False)) if hide else key[1],
             "runs": len(every),
             "subagent_runs": len(sub),
             "median_ms": round(statistics.median(every)) if every else None,
@@ -337,8 +366,8 @@ def main():
                     help="read only the N most recently modified transcript files, "
                          "subagent transcripts included (default: all of them)")
     ap.add_argument("--redact", action="store_true",
-                    help="print basenames and labels instead of full commands, "
-                         "for a report that leaves this machine")
+                    help="print file names, plain-word arguments and labels instead "
+                         "of full commands, for a report that leaves this machine")
     ap.add_argument("--json", action="store_true", help="emit JSON instead of a report")
     args = ap.parse_args()
 

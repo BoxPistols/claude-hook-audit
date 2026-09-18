@@ -40,8 +40,8 @@ STOPPED A TOOL CALL (hook exited 2)
 
 An excerpt of a real report. Hook names are replaced with brackets, and the two ranked
 rows are shown as they read before those hooks were marked `async`; every number is
-measured. A real run prints the command, and `--redact` prints the script basename with
-its arguments.
+measured. A real run prints the command, and `--redact` prints the script's file name
+with its plain-word arguments.
 
 Two hooks that each look fine at 300ms were costing 25 of those 27.7 minutes. Both only
 updated a status display, so neither needed to block. Marking them `"async": true`
@@ -136,15 +136,23 @@ not exist is an error rather than a warning.
 ## Sharing a report
 
 The default report prints absolute paths and full command strings. Both identify your
-account, and an inline shell hook carries whatever its author put in `settings.json`.
-Use `--redact` for a report that leaves your machine:
+account, and a command carries whatever its author put in `settings.json`, including a
+credential passed as an argument. Use `--redact` for a report that leaves your machine:
 
 ```
   *         notify.py busy            # instead of /usr/bin/python3 "$HOME/hooks/notify.py" busy
+            send.py --token …         # instead of python3 "$HOME/hooks/send.py" --token tok-1234
             <inline shell>            # a piped or chained command is not shown at all
 ```
 
-Counts and timings are identical in both modes.
+`--redact` keeps the script's file name, and an argument only when it is a short plain
+word or a file name, because those tell two hooks apart. Every other argument becomes
+`…`, and so does the value after a flag such as `--token` or `--password`. A URL is
+masked, and a `NAME=value` in front of the command is dropped. A `statusMessage` is
+printed as written, since it is text you chose to display.
+
+The masking goes by the shape of each argument, not by recognizing a secret, so read a
+redacted report once before you share it. Counts and timings are identical in both modes.
 
 ## Prior art
 
@@ -263,7 +271,9 @@ Python 3.9以上、依存なし。ローカルのファイルを読むだけで�
 
 ## レポートを人に渡すとき
 
-既定の出力には絶対パスとコマンド文字列がそのまま出ます。どちらもアカウント名を含み、インラインシェルのフックは`settings.json`に書かれた内容をそのまま持ちます。手元から出す場合は`--redact`を使います。スクリプト名と引数だけになり、パイプや連結を含むコマンドは`<inline shell>`に置き換わります。件数と時間は両モードで同一です。
+既定の出力には絶対パスとコマンド文字列がそのまま出ます。どちらもアカウント名を含み、コマンドは引数に渡した認証情報も含めて`settings.json`に書かれた内容をそのまま持ちます。手元から出す場合は`--redact`を使います。スクリプトのファイル名と、短い英単語かファイル名の形をした引数だけを残し、それ以外の引数は`…`に置き換えます。`--token`や`--password`のようなフラグの次の値とURLも`…`になり、コマンドの前の`NAME=値`は出しません。パイプや連結を含むコマンドは`<inline shell>`に置き換わります。`statusMessage`は表示用に書いた文なので、そのまま出します。
+
+引数の形で判定していて、秘密の値そのものを見分けているわけではないため、渡す前に一度目を通してください。件数と時間は両モードで同一です。
 
 ## 処方
 

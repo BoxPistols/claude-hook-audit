@@ -121,8 +121,11 @@ A hook exists because someone wanted the behavior.
 ## Before pasting the report anywhere
 
 The default output carries absolute paths, which name the account, and full command
-strings, which can carry a token if the hook is inline shell. Re-run with `--redact`
-for anything that leaves the machine. Counts and timings are the same either way.
+strings, which can carry a token in an argument or in inline shell. Re-run with
+`--redact` for anything that leaves the machine. It keeps file names and plain-word
+arguments and masks the rest, but it goes by shape, and a `statusMessage` is printed as
+written, so read the redacted report before pasting it. Counts and timings are the same
+either way.
 
 ## Scope
 

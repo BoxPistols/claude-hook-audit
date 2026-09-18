@@ -14,9 +14,16 @@ The default report prints absolute paths, which contain your account name, and f
 command strings, which contain whatever the hook's author put in `settings.json` —
 including a credential, if one is there.
 
-Run with `--redact` for anything that leaves your machine. It prints script basenames
-with their arguments, and replaces a piped or chained command, or a `-c` script, with a
-placeholder rather than its contents. Counts and timings are identical in both modes.
+Run with `--redact` for anything that leaves your machine. It prints script file names,
+and keeps an argument only when it is a short plain word or a file name. Every other
+argument becomes `…`, as do the value after a flag such as `--token` or `--password` and
+any URL, and a `NAME=value` in front of the command is dropped. A piped or chained
+command, or a `-c` script, is replaced with a placeholder rather than its contents. A
+`statusMessage` is printed as written.
+
+The masking goes by the shape of each argument, not by recognizing a secret, so read a
+redacted report once before you share it. Counts and timings are identical in both
+modes.
 
 Transcripts themselves carry far more than hook timings. This tool never emits transcript
 content: only the hook fields it measures, and the command strings described above.

@@ -27,13 +27,15 @@ QUIET = "/opt/example/bin/quiet-hook"
 REPORT = 'node "${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs"'
 KEEPER = 'node "${CLAUDE_PLUGIN_ROOT}/hooks/gatekeeper.mjs"'
 DORMANT = 'node "${CLAUDE_PLUGIN_ROOT}/hooks/farewell.mjs"'
+# Punctuation and a digit, so --redact would mask parts of it if it read it as a command.
+LABEL = "checking the write, step 2"
 
 SETTINGS = {
     "hooks": {
         # A hook with a statusMessage: the transcript records the message, not this.
         "PreToolUse": [{"matcher": "Write", "hooks": [
             {"type": "command", "command": GATE, "timeout": 10,
-             "statusMessage": "checking the write"}]}],
+             "statusMessage": LABEL}]}],
         # The same command, async on one event and blocking on another.
         "Stop": [{"matcher": "*", "hooks": [
             {"type": "command", "command": WIDGET, "async": True, "timeout": 5}]}],
@@ -88,8 +90,8 @@ def transcript(install):
     lines.append(rec("Stop", 50, WIDGET, kind="hook_cancelled", timedOut=False))
     lines.append(rec("Stop", 400, WIDGET))
     # Recorded under the statusMessage, not the command.
-    lines.append(rec("PreToolUse", 120, "checking the write"))
-    lines.append(rec("PreToolUse", 180, "checking the write"))
+    lines.append(rec("PreToolUse", 120, LABEL))
+    lines.append(rec("PreToolUse", 180, LABEL))
     # One main-session run; the five inside subagents live in their own transcript.
     lines.append(rec("SessionStart", 900, REPORT))
     # Blocked tool calls: no command field, no duration, command in the message.
@@ -169,7 +171,7 @@ class ScanTest(unittest.TestCase):
         self.assertIn("1 session + 1 subagent transcript,", self.report)
 
     def test_status_message_resolves_to_its_hook(self):
-        r = self.rows[("PreToolUse", "checking the write")]
+        r = self.rows[("PreToolUse", LABEL)]
         self.assertTrue(r["in_settings"])
         self.assertEqual(r["timeout_s"], 10)
         self.assertFalse(r["is_async"])
@@ -216,7 +218,7 @@ class ScanTest(unittest.TestCase):
     def test_p95_is_nearest_rank_and_absent_below_twenty_runs(self):
         self.assertEqual(self.rows[("UserPromptSubmit", WIDGET)]["p95_ms"], 20000)
         self.assertEqual(self.rows[("UserPromptSubmit", WIDGET)]["max_ms"], 60000)
-        self.assertIsNone(self.rows[("PreToolUse", "checking the write")]["p95_ms"])
+        self.assertIsNone(self.rows[("PreToolUse", LABEL)]["p95_ms"])
         self.assertEqual(scan.percentile(list(range(1, 21)), 0.95), 19)
         self.assertIsNone(scan.percentile([], 0.95))
 
@@ -285,13 +287,33 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(scan.redact('/usr/bin/python3 "$HOME/h/notify.py" busy'),
                          "notify.py busy")
         self.assertEqual(scan.redact('bash "/opt/example/run.sh"'), "run.sh")
-        self.assertEqual(scan.redact("a label with no path"), "a label with no path")
+        self.assertEqual(scan.redact("uv run /opt/example/check.py --quiet"),
+                         "run check.py --quiet")
         self.assertEqual(scan.redact('IN=$(cat); printf %s "$IN" | /opt/x/y'),
                          "<inline shell>")
         # -c carries the script itself, so it never reaches a shared report
         self.assertEqual(scan.redact('python3 -c "import os"'), "<inline script>")
         self.assertEqual(scan.redact('python3 -c "print(1); print(TOKEN)"'),
                          "<inline shell>")
+
+    def test_redact_masks_a_credential_passed_to_a_command(self):
+        """Every value here is invented. None of them may reach a shared report."""
+        cases = {
+            "EXAMPLE_TOKEN=tok-0000-FAKE /usr/bin/python3 /opt/example/send.py":
+                "send.py",
+            "/opt/example/notify --token tok-FAKE-0000": "notify --token …",
+            "notify-send --api-key=FAKE0000 done": "notify-send --api-key=… done",
+            "/opt/example/login --password hunter": "login --password …",
+            'curl -H "Authorization: Bearer FAKE0000" https://example.com/':
+                "curl -H … …",
+        }
+        for command, shown in cases.items():
+            self.assertEqual(scan.redact(command), shown, command)
+
+    def test_redact_prints_a_status_message_as_written(self):
+        """Known to be a label only from the configuration, so checked end to end."""
+        shown = {(r["event"], r["command"]) for r in self.hidden["hooks"]}
+        self.assertIn(("PreToolUse", LABEL), shown)
 
     def test_the_readme_sample_is_the_format_the_program_prints(self):
         """A sample output that has drifted from the program is worse than none.
