@@ -1,6 +1,6 @@
 ---
 name: hook-audit
-description: Profile Claude Code hooks from transcripts that already exist, with no instrumentation. Ranks hooks by total blocking time (runs x median), separates hooks that block the loop from async ones, finds timeouts and hangs, and proposes async conversion. Use when sessions feel sluggish, a hook is suspected of being slow, tool calls stall, or hooks need review. Triggers: slow hook, hooks are slow, session feels sluggish, tool calls hang, hook timeout, PreToolUse latency, hook performance, blocking hooks.
+description: Profile Claude Code hooks from transcripts that already exist, with no instrumentation. Ranks hooks by the time they held up the main session, separates hooks that block the loop from async ones, finds timeouts and hangs, and proposes async conversion. Use when sessions feel sluggish, a hook is suspected of being slow, tool calls stall, or hooks need review. Triggers: slow hook, hooks are slow, session feels sluggish, tool calls hang, hook timeout, PreToolUse latency, hook performance, blocking hooks.
 ---
 
 # Hook audit
