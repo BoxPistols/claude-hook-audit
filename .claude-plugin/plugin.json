@@ -1,7 +1,7 @@
 {
   "name": "hook-audit",
   "description": "Profile Claude Code hooks from transcripts that already exist. Ranks hooks by the time they held up the main session, separates subagent runs, finds hangs, timeouts and blocked tool calls.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": {
     "name": "BoxPistols"
   },
