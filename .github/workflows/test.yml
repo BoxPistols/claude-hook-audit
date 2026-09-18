@@ -17,7 +17,7 @@ jobs:
         # The floor the README promises, and the current release.
         python: ["3.9", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Do not leave the job's token in the checkout's git config.
           persist-credentials: false
