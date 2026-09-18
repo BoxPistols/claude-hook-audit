@@ -180,6 +180,16 @@ and MCP servers. This project deliberately does not overlap with it.
   project's `.claude/settings*.json` with `--project`, any `--settings FILE`, and the
   `hooks/hooks.json` of each installed plugin.
 
+## What it was validated against
+
+The record shapes above were read off about 10,000 hook records written by Claude Code
+2.1.267 through 2.1.275, on one machine with one person's hook configuration. That is the
+evidence behind every claim here about what the transcript contains. A different version
+may write something different, so an outcome type this scanner does not recognize is
+reported as unrecognized rather than dropped, and a run it cannot attribute to a hook is
+counted and named. If your report shows either, the format has moved and the numbers
+around it deserve a second look.
+
 ## Development
 
 ```bash
@@ -244,6 +254,8 @@ Python 3.9以上、依存なし。ローカルのファイルを読むだけで�
 - プラグインのコマンドは`${CLAUDE_PLUGIN_ROOT}`が展開済みの形で記録されることがあるため、両方の形で索引します
 
 それでも突き合わせられなかったものは`?`を付け、ブロックとして数えます。これは安全側の仮定であって、計測結果ではありません。識別できない記録は件数と型名を出します。知らない型の記録も「知らない型」として報告します。自分が仕様を持っていない形式を読んでいるためです。
+
+ここで挙げた記録の形は、Claude Code 2.1.267から2.1.275が書いた約10,000件のhook記録から読み取ったものです。1台、1人のフック構成ぶんです。別の版では違う形を書く可能性があるため、知らない型は「知らない型」として、識別できない記録は件数と型名として出します。どちらかがレポートに出たら、形式が変わったと考えて周辺の数字を見直してください。
 
 読めなかったファイルと、存在するのにパースできない設定ファイルは警告として出します。黙って空の設定として扱うと、「どれも非同期でなく、どれもタイムアウト未設定」という確信のあるレポートが出てしまいます。`--settings`と`--project`に存在しないパスを渡した場合は警告ではなくエラーにします。
 
