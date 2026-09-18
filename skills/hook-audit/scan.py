@@ -44,6 +44,9 @@ PLAIN_ARG = re.compile(r"-{0,2}[A-Za-z][A-Za-z-]{0,23}")
 FILE_ARG = re.compile(r"[A-Za-z0-9_-]{1,40}\.[A-Za-z0-9]{1,5}")
 SECRET_FLAG = re.compile(r"-.*(token|key|secret|pass|auth|cred)", re.I)
 ENV_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# An absolute or ~ path inside a statusMessage. Not after a word character, a dot or
+# a slash, so "and/or", "1/2", "./x" and a URL are left as written.
+LABEL_PATH = re.compile(r"(?<![\w.~/])~?(?:/[^\s/]+)+/?")
 MASK = "…"
 
 
@@ -74,10 +77,12 @@ def redact(s, label=False):
     like a credential. The masking goes by shape, not by recognizing a secret.
 
     A statusMessage (label) is text its author chose to display, so it is returned
-    as written. Only the caller knows which strings are labels.
+    as written, except that a path in it is cut to its file name like a command's:
+    a plugin's label is written by someone else and can name an absolute path.
+    Only the caller knows which strings are labels.
     """
     if label:
-        return s
+        return LABEL_PATH.sub(lambda m: os.path.basename(m.group().rstrip("/")), s)
     if any(t in s for t in SHELL_CHARS):
         return "<inline shell>"
     try:
@@ -100,7 +105,8 @@ def redact(s, label=False):
         elif "=" in w:
             name = w.split("=", 1)[0]
             out.append(name + "=" + MASK if PLAIN_ARG.fullmatch(name) else MASK)
-        elif PLAIN_ARG.fullmatch(base) or FILE_ARG.fullmatch(base):
+        # Of a value with a slash only a file name is kept: base64 carries slashes too.
+        elif FILE_ARG.fullmatch(base) or ("/" not in w and PLAIN_ARG.fullmatch(w)):
             out.append(base)
         else:
             out.append(MASK)
@@ -187,7 +193,8 @@ def settings_index(sources, problems):
                             "enabled": False, "matchers": set(), "origins": set(),
                             "label": False})
                         e["enabled"] = e["enabled"] or enabled
-                        # Recorded under the statusMessage: --redact prints it as written.
+                        # Recorded under the statusMessage: --redact keeps it as written
+                        # but for paths.
                         e["label"] = e["label"] or k == label
                         e["async"] = e["async"] or bool(h.get("async"))
                         if h.get("timeout") is not None:

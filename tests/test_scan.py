@@ -306,6 +306,9 @@ class ScanTest(unittest.TestCase):
             "/opt/example/login --password hunter": "login --password …",
             'curl -H "Authorization: Bearer FAKE0000" https://example.com/':
                 "curl -H … …",
+            # base64 carries slashes, and its last piece can be letters only.
+            "/opt/example/push.py FAKE0000/K7FAKE/bFakeSecretTail": "push.py …",
+            "/opt/example/push.py -s fakeAB/fakeTail": "push.py -s …",
         }
         for command, shown in cases.items():
             self.assertEqual(scan.redact(command), shown, command)
@@ -314,6 +317,17 @@ class ScanTest(unittest.TestCase):
         """Known to be a label only from the configuration, so checked end to end."""
         shown = {(r["event"], r["command"]) for r in self.hidden["hooks"]}
         self.assertIn(("PreToolUse", LABEL), shown)
+
+    def test_redact_cuts_a_path_in_a_status_message_to_its_file_name(self):
+        """A plugin's label is not the user's text, and a path in it names the account."""
+        cases = {
+            "Running /Users/example/hooks/check.py": "Running check.py",
+            "Linting (/Users/example/proj/src)": "Linting (src)",
+            "Checking ~/hooks/check.py, step 1/2 and/or ./local/x.py":
+                "Checking check.py, step 1/2 and/or ./local/x.py",
+        }
+        for label, shown in cases.items():
+            self.assertEqual(scan.redact(label, label=True), shown, label)
 
     def test_the_readme_sample_is_the_format_the_program_prints(self):
         """A sample output that has drifted from the program is worse than none.

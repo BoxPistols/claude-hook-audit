@@ -124,8 +124,8 @@ The default output carries absolute paths, which name the account, and full comm
 strings, which can carry a token in an argument or in inline shell. Re-run with
 `--redact` for anything that leaves the machine. It keeps file names and plain-word
 arguments and masks the rest, but it goes by shape, and a `statusMessage` is printed as
-written, so read the redacted report before pasting it. Counts and timings are the same
-either way.
+written but for its paths, so read the redacted report before pasting it. Counts and
+timings are the same either way.
 
 ## Scope
 

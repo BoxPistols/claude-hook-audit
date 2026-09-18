@@ -19,7 +19,7 @@ and keeps an argument only when it is a short plain word or a file name. Every o
 argument becomes `…`, as do the value after a flag such as `--token` or `--password` and
 any URL, and a `NAME=value` in front of the command is dropped. A piped or chained
 command, or a `-c` script, is replaced with a placeholder rather than its contents. A
-`statusMessage` is printed as written.
+`statusMessage` is printed as written, except that a path in it is cut to its file name.
 
 The masking goes by the shape of each argument, not by recognizing a secret, so read a
 redacted report once before you share it. Counts and timings are identical in both

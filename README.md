@@ -149,7 +149,7 @@ credential passed as an argument. Use `--redact` for a report that leaves your m
 word or a file name, because those tell two hooks apart. Every other argument becomes
 `…`, and so does the value after a flag such as `--token` or `--password`. A URL is
 masked, and a `NAME=value` in front of the command is dropped. A `statusMessage` is
-printed as written, since it is text you chose to display.
+printed as written, except that a path in it is cut to its file name.
 
 The masking goes by the shape of each argument, not by recognizing a secret, so read a
 redacted report once before you share it. Counts and timings are identical in both modes.
@@ -271,7 +271,7 @@ Python 3.9以上、依存なし。ローカルのファイルを読むだけで�
 
 ## レポートを人に渡すとき
 
-既定の出力には絶対パスとコマンド文字列がそのまま出ます。どちらもアカウント名を含み、コマンドは引数に渡した認証情報も含めて`settings.json`に書かれた内容をそのまま持ちます。手元から出す場合は`--redact`を使います。スクリプトのファイル名と、短い英単語かファイル名の形をした引数だけを残し、それ以外の引数は`…`に置き換えます。`--token`や`--password`のようなフラグの次の値とURLも`…`になり、コマンドの前の`NAME=値`は出しません。パイプや連結を含むコマンドは`<inline shell>`に置き換わります。`statusMessage`は表示用に書いた文なので、そのまま出します。
+既定の出力には絶対パスとコマンド文字列がそのまま出ます。どちらもアカウント名を含み、コマンドは引数に渡した認証情報も含めて`settings.json`に書かれた内容をそのまま持ちます。手元から出す場合は`--redact`を使います。スクリプトのファイル名と、短い英単語かファイル名の形をした引数だけを残し、それ以外の引数は`…`に置き換えます。`--token`や`--password`のようなフラグの次の値とURLも`…`になり、コマンドの前の`NAME=値`は出しません。パイプや連結を含むコマンドは`<inline shell>`に置き換わります。`statusMessage`はそのまま出しますが、中に書かれたパスはファイル名だけにします。
 
 引数の形で判定していて、秘密の値そのものを見分けているわけではないため、渡す前に一度目を通してください。件数と時間は両モードで同一です。
 
